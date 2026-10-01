@@ -2116,6 +2116,81 @@ async fn loaded_session_keeps_its_duration_budget() {
     restored.finish().await.unwrap();
 }
 
+/// A real subprocess cannot import a larger snapshot budget into a stricter checkout.
+#[tokio::test]
+async fn restored_session_cannot_raise_the_destination_memory_budget() {
+    let pool = Pool::new(config()).await.unwrap();
+    let destination = ReplConfig {
+        limits: Some(ResourceLimits::default().max_memory(10 * 1024 * 1024)),
+        ..ReplConfig::default()
+    };
+    let allocation = "large = b'a' * (12 * 1024 * 1024)\nlen(large)";
+    let mut fresh = pool.checkout(&destination).await.unwrap();
+    assert_eq!(
+        expect_complete(fresh.feed("6 * 7", vec![], vec![], false, &mut no_print).await.unwrap()),
+        MontyObject::int(42)
+    );
+    let error = fresh
+        .feed(allocation, vec![], vec![], false, &mut no_print)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PoolError::Runtime(ref exc) if exc.exc_type() == ExcType::MemoryError));
+    drop(fresh);
+    for suspended in [false, true] {
+        let mut source = pool
+            .checkout(&ReplConfig {
+                limits: Some(ResourceLimits::default().max_memory(64 * 1024 * 1024)),
+                ..ReplConfig::default()
+            })
+            .await
+            .unwrap();
+        source
+            .feed(
+                if suspended { "x = 42\nfetch('x')" } else { "x = 42" },
+                vec![],
+                vec![],
+                false,
+                &mut no_print,
+            )
+            .await
+            .unwrap();
+        let state = source.dump().await.unwrap();
+        drop(source);
+        let mut restored = pool.checkout(&destination).await.unwrap();
+        let (event, _) = restored.restore(state, vec![], &mut no_print).await.unwrap();
+        if suspended {
+            assert!(matches!(event, Some(TurnEvent::FunctionCall { .. })));
+            restored
+                .resume(ResumeValue::Return(MontyObject::none()), &mut no_print)
+                .await
+                .unwrap();
+        } else {
+            assert!(event.is_none());
+        }
+        assert_eq!(
+            expect_complete(restored.feed("x", vec![], vec![], false, &mut no_print).await.unwrap()),
+            MontyObject::int(42)
+        );
+        let error = restored
+            .feed(allocation, vec![], vec![], false, &mut no_print)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PoolError::Runtime(ref exc) if exc.exc_type() == ExcType::MemoryError));
+        drop(restored);
+    }
+    let mut sibling = pool.checkout(&destination).await.unwrap();
+    assert_eq!(
+        expect_complete(
+            sibling
+                .feed("6 * 7", vec![], vec![], false, &mut no_print)
+                .await
+                .unwrap()
+        ),
+        MontyObject::int(42)
+    );
+    sibling.finish().await.unwrap();
+}
+
 // =============================================================================
 // Lifecycle
 // =============================================================================

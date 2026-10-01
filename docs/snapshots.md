@@ -344,8 +344,9 @@ Calling a loader after a feed or a previous load is rejected before restoration,
 
 ## What restoring does and does not carry
 
-- **The dump carries its own configuration.** `script_name`, resource limits and type-check state come from the dump,
-    not from the `checkout()` that restored it.
+- **The dump carries its own configuration.** `script_name` and type-check state come from the dump.
+    The worker caps each restored resource limit at the restoring `checkout()` limit.
+    Stricter dump limits remain in effect.
 - **The instance store does not travel.** Host objects sent before the dump are unknown to the restored session: they
     come back as [`MontyClassProxy`][pydantic_monty.MontyClassProxy] (a host class, `type(x)` included, as [`MontyClassTypeProxy`][pydantic_monty.MontyClassTypeProxy] in Python and as a plain
     `{ __monty_type__: 'Type', ... }` marker in JavaScript), method calls on them

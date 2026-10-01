@@ -104,11 +104,12 @@ without one is unlimited.
     Other memory retained between sessions therefore consumes the headroom
     rather than raising the cap, and a worker whose residue outgrows it is killed
     and replaced rather than allowed to grow indefinitely.
-- **Restoring a dump is bounded by the checkout it lands in.** `load_session` /
-    `load_snapshot` restore the dump's own limits (see
-    [snapshot configuration](../snapshots.md#what-restoring-does-and-does-not-carry)), and the cap is re-derived from
-    them once the session exists, but the load *itself* runs under the limit the
-    `checkout()` config applied. Restoring a large dump into a checkout with a
+- **Restoring a dump is bounded by the checkout it lands in.** `load_session` and
+    `load_snapshot` cap restored limits at the `checkout()` limits.
+    Stricter dump limits remain in effect.
+    See [snapshot configuration](../snapshots.md#what-restoring-does-and-does-not-carry).
+    The load itself also runs under the limit the `checkout()` config applied.
+    Restoring a large dump into a checkout with a
     much smaller `max_memory` can therefore exceed it while loading; pass a
     comparable limit to `checkout()`.
 - **The wasm worker cannot classify a hard breach.** A soft breach is a normal

@@ -11,7 +11,9 @@ use monty_proto::{
     worker::{Child, HandleOutcome, dispatch_frame},
     write_frame,
 };
-use monty_types::{CompileOptions, MONTY_VERSION, MontyObject, NamedValues, PrintWriter, ResourceTracker, unstable};
+use monty_types::{
+    CompileOptions, MONTY_VERSION, MontyObject, NamedValues, PrintWriter, ResourceLimits, ResourceTracker, unstable,
+};
 
 /// Starts a feed with `f` already bound, leaving the worker at its first external call.
 fn start_external_call(child: &mut Child, code: &str) -> WireFunctionCall {
@@ -470,6 +472,63 @@ fn load_re_announces_deep_suspension_args() {
     assert_eq!(call.function_name, "f");
     // the empty innermost list, 100 wrappers, and nothing else
     assert_eq!(call.values.0.len(), 101);
+}
+
+/// Restore caps both idle and suspended trackers before reporting the session budget.
+#[test]
+fn restore_caps_idle_and_suspended_resource_limits() {
+    for suspended in [false, true] {
+        let repl = MontyRepl::new(
+            "saved.py",
+            ResourceTracker::new(
+                ResourceLimits::default()
+                    .max_memory(64 * 1024 * 1024)
+                    .max_suspensions(20),
+            ),
+            CompileOptions::default(),
+        );
+        let progress = repl
+            .feed_start(
+                if suspended { "x = 42\nf(x)" } else { "x = 42" },
+                vec![("f".to_owned(), MontyObject::function("f".to_owned(), None))],
+                PrintWriter::Stdout,
+            )
+            .unwrap();
+        let session = match &progress {
+            ReplProgress::Complete { repl, .. } => SessionRef::Idle(repl),
+            progress => SessionRef::Suspended(progress),
+        };
+        let state = dump("saved.py", None, session).unwrap();
+        let mut child = Child::default();
+        let configure = frame_request(pb::parent_request::Kind::Configure(pb::Configure {
+            protocol_version: PROTOCOL_VERSION,
+            monty_version: MONTY_VERSION.to_owned(),
+            limits: Some(
+                (&ResourceLimits::default()
+                    .max_memory(10 * 1024 * 1024)
+                    .max_suspensions(3))
+                    .into(),
+            ),
+            ..Default::default()
+        }));
+        dispatch_frame(&mut child, &configure);
+        let request = frame_request(pb::parent_request::Kind::Load(pb::Load { state: state.into() }));
+        let (bytes, outcome) = dispatch_frame(&mut child, &request);
+        assert_eq!(outcome, HandleOutcome::Continue);
+        let events = decode_full_events(&bytes);
+        assert_eq!(child.session_budget().max_memory, Some(10 * 1024 * 1024));
+        assert_eq!(child.session_budget().max_suspensions, Some(3));
+        assert_eq!(events.last().unwrap().max_suspensions, Some(3));
+        assert_eq!(events.last().unwrap().restored_script_name.as_deref(), Some("saved.py"));
+        if suspended {
+            assert!(matches!(
+                events.last().unwrap().kind,
+                Some(pb::child_event::Kind::FunctionCall(_))
+            ));
+        } else {
+            assert_eq!(expect_complete(feed(&mut child, "x").1), MontyObject::int(42));
+        }
+    }
 }
 
 /// Decodes complete events, including their session budget fields.

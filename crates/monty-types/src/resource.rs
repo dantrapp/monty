@@ -315,6 +315,22 @@ impl Default for ResourceTracker {
 }
 
 impl ResourceTracker {
+    /// Tightens restored limits to the destination policy without resetting execution clocks.
+    /// A snapshot can retain stricter limits but cannot increase the destination's allowance.
+    pub fn tighten_limits(&mut self, ceiling: &ResourceLimits) {
+        self.limits.max_memory = tighter_limit(self.limits.max_memory, ceiling.max_memory);
+        self.limits.max_feed_duration = tighter_limit(self.limits.max_feed_duration, ceiling.max_feed_duration);
+        self.limits.max_turn_duration = tighter_limit(self.limits.max_turn_duration, ceiling.max_turn_duration);
+        self.limits.max_total_sleep = tighter_limit(self.limits.max_total_sleep, ceiling.max_total_sleep);
+        self.limits.gc_interval = tighter_limit(self.limits.gc_interval, ceiling.gc_interval);
+        self.limits.max_recursion_depth = self.limits.max_recursion_depth.min(ceiling.max_recursion_depth);
+        self.limits.max_suspensions = self.limits.max_suspensions.min(ceiling.max_suspensions);
+        if let Some(limit) = self.recursion_limit_override.get() {
+            self.recursion_limit_override
+                .set(Some(limit.min(self.limits.max_recursion_depth)));
+        }
+    }
+
     /// Creates a new ResourceTracker with the given limits.
     ///
     /// The execution-time clock starts at zero and only runs while the VM
@@ -724,6 +740,14 @@ impl ResourceTracker {
         }
         self.recursion_limit_override.set(Some(new_limit));
         Ok(())
+    }
+}
+
+/// Combines optional ceilings, where an absent limit permits any value.
+fn tighter_limit<T: Ord>(existing: Option<T>, ceiling: Option<T>) -> Option<T> {
+    match (existing, ceiling) {
+        (Some(existing), Some(ceiling)) => Some(existing.min(ceiling)),
+        (existing, ceiling) => existing.or(ceiling),
     }
 }
 

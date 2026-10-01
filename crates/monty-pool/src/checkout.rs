@@ -451,7 +451,7 @@ pub struct Checkout {
 /// Parent-enforced limits from `Configure` or the first reply after `Load`.
 /// Restoring resets suspension and sleep totals, but keeps their limits as ceilings:
 /// untrusted worker replies can only tighten them. Duration budgets backstop the
-/// child's enforcement, so restoring adopts the dump's duration limits.
+/// child's enforcement, so restoring adopts the worker's capped duration limits.
 #[derive(Clone, Copy)]
 struct SessionBudget {
     /// The session's `max_feed_duration`, when configured.
@@ -792,10 +792,10 @@ impl Checkout {
     /// calls can still be answered by [`Checkout::resume_from_mounts`]. A dump
     /// taken mid-OS-call re-announces the call in full, so the returned event
     /// is that same [`TurnEvent::OsCall`] — restoring never answers it here.
-    /// The session's resource budget is taken from the dump, so the prior
-    /// `Configure` limits are dropped here and re-adopted from the worker's
-    /// reply — except that this checkout's configured `max_suspensions` stays
-    /// as a ceiling on the re-adopted one; the count restarts at zero.
+    /// The worker caps snapshot resource limits at the checkout's configured limits.
+    /// Stricter snapshot limits and elapsed execution time remain in effect.
+    /// The parent adopts these effective limits from the worker's reply.
+    /// The suspension count restarts at zero.
     ///
     /// Returns the re-announced suspension (`Some` — a suspended dump) or `None`
     /// (an idle dump), paired with the worker's adopted script name (the dump's,
