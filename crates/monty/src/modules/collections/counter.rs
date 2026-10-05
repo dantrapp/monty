@@ -404,6 +404,9 @@ pub(crate) fn counter_most_common<'h>(
         .collect();
     let order = counter_order(counts, vm)?;
     let take = limit.unwrap_or(order.len()).min(order.len());
+    if take == 0 {
+        return Ok(vm.heap.allocate_as(List::new(Vec::new())).into_value());
+    }
     // Resolve ordinals once after comparisons, before allocating result tuples.
     vm.heap.tracker.check_allocation(
         counter

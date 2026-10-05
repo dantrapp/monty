@@ -762,7 +762,7 @@ impl Dict {
         let slots = self.entries.len();
         let live = self.len();
         let full = slots == self.entries.capacity() || self.indices.len() == self.indices.capacity();
-        if slots != live && (live == 0 || slots >= 64 && (live <= slots / 2 || full && slots - live >= slots / 4)) {
+        if should_compact_entries(slots, live, full) {
             self.version = self.version.saturating_add(1);
             self.entries.retain(DictEntry::is_live);
             self.indices.clear();
@@ -2288,6 +2288,11 @@ pub fn dict_fromkeys(args: ArgValues, kind: DictKind, vm: &mut VM<'_>) -> RunRes
     Ok(Value::Ref(heap_id))
 }
 
+/// Shared occupancy policy for ordered dict and set storage.
+pub(crate) fn should_compact_entries(slots: usize, live: usize, full: bool) -> bool {
+    slots != live && (live == 0 || slots >= 64 && (live <= slots / 2 || full && slots - live >= slots / 4))
+}
+
 /// An insertion-order cursor. Only the logical offset is persisted because dumps
 /// pack live entries. Structural mutations invalidate the cached physical offset,
 /// preserving the existing ordinal behavior even when compaction moves entries.
@@ -2310,8 +2315,11 @@ impl EntryCursor {
         len: usize,
         mut is_live: impl FnMut(usize) -> bool,
     ) -> Option<usize> {
+        if self.index >= len {
+            return None;
+        }
         let position = if slots == len {
-            (self.index < len).then_some(self.index)
+            Some(self.index)
         } else if let Some(start) = self.position.filter(|_| self.version == version && version != u32::MAX) {
             (start..slots).find(|&index| is_live(index))
         } else {
@@ -2321,6 +2329,27 @@ impl EntryCursor {
         self.position = Some(position + 1);
         self.version = version;
         Some(position)
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::EntryCursor;
+
+    #[test]
+    fn exhausted_cursor_does_not_scan_trailing_holes() {
+        let mut cursor = EntryCursor::default();
+        for index in 0..48 {
+            assert_eq!(cursor.next(0, 64, 48, |i| i < 48), Some(index));
+        }
+        for _ in 0..10 {
+            assert_eq!(
+                cursor.next(0, 64, 48, |_| panic!("exhausted cursor scanned storage")),
+                None
+            );
+        }
+        // A new live ordinal is still visible to consumers that follow insertions.
+        assert_eq!(cursor.next(1, 65, 49, |i| i < 48 || i == 64), Some(64));
     }
 }
 

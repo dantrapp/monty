@@ -159,24 +159,31 @@ def check_contracts(pools):
             expected = session.feed_run(SNAPSHOT_CHECK)
             snapshots.append((label, data, expected))
         for name, code in [('dict_churn', CHURN), ('set_churn', SET_CHURN)]:
-            low, high = 0, 16 * 1024 * 1024
+            low, high = 1024, 16 * 1024 * 1024
             trials = []
-            while high - low > 16 * 1024:
-                limit = (low + high) // 2
+
+            def trial(limit):
                 try:
                     with pool.checkout(limits=ResourceLimits(max_memory=limit)) as session:
                         session.feed_run(code, inputs={'window': 10_000, 'events': 20_000})
                     passed = True
                 except MontyRuntimeError as exc:
-                    if 'MemoryError' not in str(exc):
+                    if not isinstance(exc.exception(), MemoryError):
                         raise
                     passed = False
                 trials.append({'limit': limit, 'passed': passed})
-                if passed:
+                return passed
+
+            if trial(low):
+                raise RuntimeError(f'{label}/{name}: expected a failing lower bound at {low} bytes')
+            if not trial(high):
+                raise RuntimeError(f'{label}/{name}: no passing upper bound within {high} bytes')
+            while high - low > 16 * 1024:
+                limit = (low + high) // 2
+                if trial(limit):
                     high = limit
                 else:
                     low = limit
-            assert any(trial['passed'] for trial in trials), (label, name)
             memory.append(
                 {'binary': label, 'workload': name, 'failing_limit': low, 'passing_limit': high, 'trials': trials}
             )
@@ -205,6 +212,8 @@ def main():
     parser.add_argument('--repeats', type=int, default=7)
     parser.add_argument('--contracts', action='store_true', help='Check memory limits and snapshot compatibility')
     args = parser.parse_args()
+    if args.repeats <= 0:
+        parser.error('--repeats must be positive')
     report = {
         'platform': platform.platform(),
         'python': platform.python_version(),

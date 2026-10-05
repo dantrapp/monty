@@ -23,7 +23,7 @@ use crate::{
     resource_checks::check_entry_table_growth,
     types::{
         LazyHeapSet, Type,
-        dict::{EntryCursor, ProbeOutcome, eq_is_native, probe_native_eq},
+        dict::{EntryCursor, ProbeOutcome, eq_is_native, probe_native_eq, should_compact_entries},
         list::repr_items_fmt,
     },
     value::{EitherStr, VALUE_SIZE, Value},
@@ -510,7 +510,7 @@ impl SetStorage {
         let slots = self.entries.len();
         let live = self.len();
         let full = slots == self.entries.capacity() || self.indices.len() == self.indices.capacity();
-        if slots != live && (live == 0 || slots >= 64 && (live <= slots / 2 || full && slots - live >= slots / 4)) {
+        if should_compact_entries(slots, live, full) {
             self.version = self.version.saturating_add(1);
             self.entries.retain(SetEntry::is_live);
             self.indices.clear();
