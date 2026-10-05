@@ -69,6 +69,15 @@ for _ in range(20):
     checksum += sum(s)
 [len(s), checksum]
 """
+DENSE_FROZENSET = """
+s = frozenset(range(n))
+checksum = 0
+for _ in range(20):
+    for i in range(n):
+        checksum += i in s
+    checksum += sum(s)
+[len(s), checksum]
+"""
 SMALL_DICTS = """
 checksum = 0
 for i in range(n):
@@ -116,7 +125,7 @@ def workloads():
     for name, code in [
         ('dense_dict', DENSE_DICT),
         ('dense_set', DENSE_SET),
-        ('dense_frozenset', DENSE_SET.replace('s = set(range(n))', 's = frozenset(range(n))')),
+        ('dense_frozenset', DENSE_FROZENSET),
         ('small_dicts', SMALL_DICTS),
         ('small_frozensets', SMALL_FROZENSETS),
         ('sparse_read', SPARSE_READ),
