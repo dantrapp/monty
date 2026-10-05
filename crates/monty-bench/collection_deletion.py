@@ -76,6 +76,13 @@ for i in range(n):
     checksum += d['id'] + d['quantity'] + sum(d.values())
 checksum
 """
+SMALL_FROZENSETS = """
+checksum = 0
+for i in range(n):
+    values = frozenset((i, i + 1, i + 2))
+    checksum += len(values) + sum(values)
+checksum
+"""
 SPARSE_READ = """
 d = {i: i * 3 for i in range(n)}
 for i in range(0, n, 3):
@@ -109,7 +116,9 @@ def workloads():
     for name, code in [
         ('dense_dict', DENSE_DICT),
         ('dense_set', DENSE_SET),
+        ('dense_frozenset', DENSE_SET.replace('s = set(range(n))', 's = frozenset(range(n))')),
         ('small_dicts', SMALL_DICTS),
+        ('small_frozensets', SMALL_FROZENSETS),
         ('sparse_read', SPARSE_READ),
     ]:
         yield name, code, {'n': 10_000}
@@ -130,10 +139,15 @@ d.pop(127)
 d[128] = [128]
 s.remove(127)
 s.add(128)
+frozen = frozenset(range(128))
+hash(frozen)
+frozen_members = iter(frozen)
+next(frozen_members)
 None
 """
 SNAPSHOT_CHECK = """
-[list(keys), list(values), list(items), sorted([first_member] + list(members)), list(d), len(s)]
+[list(keys), list(values), list(items), sorted([first_member] + list(members)),
+ list(d), len(s), frozen, list(frozen_members), hash(frozen)]
 """
 SET_CHURN = """
 s = set(range(window))

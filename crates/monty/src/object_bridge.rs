@@ -861,7 +861,7 @@ fn import_node(
         MontyNode::FrozenSet(ids) => {
             let set = import_set(&ids, built, vm, "unhashable frozenset element")?;
             let frozenset = FrozenSet::from_set(set);
-            Ok(Value::Ref(vm.heap.allocate(HeapData::FrozenSet(frozenset))))
+            Ok(Value::Ref(vm.heap.allocate_as(frozenset).into_id()))
         }
         MontyNode::Date(date) => {
             let value = date_type::from_ymd(date.year, i32::from(date.month), i32::from(date.day))

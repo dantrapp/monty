@@ -1290,7 +1290,7 @@ impl<'h> HeapRead<'h, FrozenSet> {
             SetAlgebra::SymmetricDifference => self.storage().symmetric_difference(&other_storage, vm)?,
         };
 
-        let heap_id = vm.heap.allocate(HeapData::FrozenSet(FrozenSet::wrap(result)));
+        let heap_id = vm.heap.allocate_as(FrozenSet::wrap(result)).into_id();
         Ok(Value::Ref(heap_id))
     }
 
@@ -1638,7 +1638,7 @@ impl FrozenSet {
             None => Self::new(),
             Some(v) => Self::from_set(Set::from_iterable(v, vm)?),
         };
-        let heap_id = vm.heap.allocate(HeapData::FrozenSet(frozenset));
+        let heap_id = vm.heap.allocate_as(frozenset).into_id();
         Ok(Value::Ref(heap_id))
     }
 }
@@ -1704,7 +1704,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, FrozenSet> {
         let Some(result) = self.sub_value(other, vm)? else {
             return Ok(None);
         };
-        let result_id = vm.heap.allocate(HeapData::FrozenSet(result));
+        let result_id = vm.heap.allocate_as(result).into_id();
         Ok(Some(Value::Ref(result_id)))
     }
 
@@ -1712,7 +1712,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, FrozenSet> {
         let Some(result) = self.and_value(other, vm)? else {
             return Ok(None);
         };
-        let result_id = vm.heap.allocate(HeapData::FrozenSet(result));
+        let result_id = vm.heap.allocate_as(result).into_id();
         Ok(Some(Value::Ref(result_id)))
     }
 
@@ -1720,7 +1720,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, FrozenSet> {
         let Some(result) = self.or_value(other, vm)? else {
             return Ok(None);
         };
-        let result_id = vm.heap.allocate(HeapData::FrozenSet(result));
+        let result_id = vm.heap.allocate_as(result).into_id();
         Ok(Some(Value::Ref(result_id)))
     }
 
@@ -1728,7 +1728,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, FrozenSet> {
         let Some(result) = self.xor_value(other, vm)? else {
             return Ok(None);
         };
-        let result_id = vm.heap.allocate(HeapData::FrozenSet(result));
+        let result_id = vm.heap.allocate_as(result).into_id();
         Ok(Some(Value::Ref(result_id)))
     }
 
@@ -1741,7 +1741,7 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, FrozenSet> {
             Some(StaticStrings::Copy) => {
                 args.check_zero_args("frozenset.copy", vm.heap)?;
                 let cloned = self.get(vm.heap).storage.clone_with_heap(vm.heap);
-                let heap_id = vm.heap.allocate(HeapData::FrozenSet(FrozenSet::wrap(cloned)));
+                let heap_id = vm.heap.allocate_as(FrozenSet::wrap(cloned)).into_id();
                 Ok(Value::Ref(heap_id))
             }
             Some(StaticStrings::Union) => {
@@ -2094,8 +2094,6 @@ impl<'h> PyDeepCopy<'h> for HeapRead<'h, FrozenSet> {
             built.add(copied?, vm)?;
         }
         let (built, vm) = guard.into_parts();
-        Ok(Value::Ref(
-            vm.heap.allocate(HeapData::FrozenSet(FrozenSet::from_set(built))),
-        ))
+        Ok(Value::Ref(vm.heap.allocate_as(FrozenSet::from_set(built)).into_id()))
     }
 }
