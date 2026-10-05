@@ -31,6 +31,7 @@ use crate::{
 /// Entry in the set storage, containing a value and its cached hash.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SetEntry {
+    #[serde(rename = "V")]
     pub(crate) value: Value,
     /// Cached hash for efficient lookup and reinsertion. Never serialized:
     /// hashes are recomputed on the first keyed operation after a dump is

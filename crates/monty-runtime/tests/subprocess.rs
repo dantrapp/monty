@@ -17,7 +17,7 @@ use monty_proto::{
 };
 use monty_types::{
     CallArgs, DateTimeSource, ExtFunctionResult, MontyDate, MontyDateTime, MontyObject, NameLookupResult, NamedValues,
-    OsPolicy, RandomSeed, RandomStart, SandboxTimeZone, SleepMode,
+    OsPolicy, RandomSeed, RandomStart, SandboxTimeZone, SleepMode, SourceRange,
     unstable::{self, MontyNode},
 };
 
@@ -414,6 +414,11 @@ fn near_limit_suspension_is_refused_cleanly() {
             1,
             None,
             false,
+            SourceRange {
+                filename: "main.py".to_owned(),
+                start: 0,
+                end: 7,
+            },
         ))),
         ..Default::default()
     };
@@ -999,7 +1004,12 @@ fn large_unnested_format_spec_preserves_the_worker() {
 
 #[test]
 fn numeric_formatting_peak_memory_preserves_the_worker() {
-    for code in ["'{:08000000d}'.format(1)", "'{:.8000000f}'.format(1.0)"] {
+    for code in [
+        "'{:08000000d}'.format(1)",
+        "'{:.8000000f}'.format(1.0)",
+        // Both parts of a complex expand to the precision.
+        "'{:.4000000f}'.format(1 + 1j)",
+    ] {
         let mut child = ChildProc::spawn();
         child.create_repl_with(configure_with_max_memory(10_000_000));
         let (_, event) = child.feed(code);
@@ -1007,6 +1017,30 @@ fn numeric_formatting_peak_memory_preserves_the_worker() {
         assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
         child.shutdown();
     }
+}
+
+/// A complex spec that CPython rejects outright must raise its `ValueError`
+/// however large its precision, not the `MemoryError` the precision would cost.
+#[test]
+fn invalid_complex_spec_is_rejected_before_its_precision_is_charged() {
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(configure_with_max_memory(10_000_000));
+    for (code, message) in [
+        (
+            "'{:=.4000000f}'.format(1 + 1j)",
+            "'=' alignment flag is not allowed in complex format specifier",
+        ),
+        (
+            "'{:0.4000000f}'.format(1 + 1j)",
+            "Zero padding is not allowed in complex format specifier",
+        ),
+    ] {
+        let (_, event) = child.feed(code);
+        let error = expect_error(event);
+        assert_eq!(error.exc_type, "ValueError", "{code}");
+        assert_eq!(error.message.as_deref(), Some(message), "{code}");
+    }
+    child.shutdown();
 }
 
 /// Gathers nested as *items* of one another (`g = asyncio.gather(g)`) cost no
@@ -2062,6 +2096,29 @@ fn deeply_nested_type_check_stubs_are_rejected_on_configure() {
     );
     child.create_repl();
     child.feed_complete("1 + 1");
+    child.shutdown();
+}
+
+/// A script named like the worker's stubs file used to overwrite them and crash
+/// the worker on a span underflow (#717); the feed now ends in an error instead.
+#[test]
+fn type_checked_script_named_like_stubs_file_is_rejected() {
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(pb::Configure {
+        script_name: "repl_type_stubs.pyi".to_owned(),
+        type_check: true,
+        type_check_stubs: Some("x: int\n".to_owned()),
+        ..configure()
+    });
+    let (_, event) = child.feed("from typing import TypeVar\nT = TypeVar('T");
+    let error = expect_error(event);
+    assert_eq!(
+        error.message.as_deref(),
+        Some(
+            "protocol violation: type checker failed: \
+             script `repl_type_stubs.pyi` collides with the type stubs file `repl_type_stubs.pyi`"
+        )
+    );
     child.shutdown();
 }
 

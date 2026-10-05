@@ -7,7 +7,7 @@ use std::{
 };
 
 use num_bigint::{BigInt, Sign};
-use num_traits::{FromPrimitive, ToPrimitive};
+use num_traits::ToPrimitive;
 use serde::de::Error as _;
 use smallvec::smallvec;
 
@@ -18,17 +18,17 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     expressions::CmpOperator,
     fstring::FormatFloat,
-    hash::{HashValue, hash_named, hash_one, hash_python_long_int, identity_hash},
+    hash::{HashValue, hash_f64, hash_named, hash_one, identity_hash},
     heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput},
     heap_data::heap_subscript,
     identity::Identity,
     intern::{BytesId, FunctionId, Interns, LongIntId, StaticStrings, StringId},
-    modules::{ModuleFunctions, itertools::ItertoolsFunctions},
+    modules::ModuleFunctions,
     percent_format::{copy_bytes_template, percent_format, percent_format_bytes},
     resource_checks::check_pow_size,
     types::{
-        Bytes, BytesIterator, CmpOrder, GenericAlias, LazyHeapSet, LongInt, Property, PyTrait, StringIterator, Type,
-        Union,
+        Bytes, BytesIterator, CmpOrder, Complex, GenericAlias, LazyHeapSet, LongInt, Property, PyTrait, StringIterator,
+        Type, Union,
         bytes::{bytes_contains, bytes_repr_fmt, concat_bytes, get_byte_at_index, repeat_bytes},
         host_class_type,
         instance::{instance_dataclass_eq, instance_getattr, instance_str, instance_user_eq},
@@ -59,37 +59,53 @@ use crate::{
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Value {
     // Immediate values (stored inline, no heap allocation)
+    #[serde(rename = "U")]
     Undefined,
+    #[serde(rename = "E")]
     Ellipsis,
+    #[serde(rename = "N")]
     NotImplemented,
+    #[serde(rename = "O")]
     None,
+    #[serde(rename = "B")]
     Bool(bool),
+    #[serde(rename = "I")]
     Int(i64),
+    #[serde(rename = "F")]
     Float(f64),
     /// An interned string literal. The StringId references the string in the Interns table.
     /// To get the actual string content, use `interns.get(string_id)`.
+    #[serde(rename = "T")]
     InternString(StringId),
     /// An interned bytes literal. The BytesId references the bytes in the Interns table.
     /// To get the actual bytes content, use `interns.get_bytes(bytes_id)`.
+    #[serde(rename = "R")]
     InternBytes(BytesId),
     /// An interned long integer literal. The `LongIntId` references the `BigInt` in the Interns table.
     /// Used for integer literals exceeding i64 range. Converted to heap-allocated `LongInt` on load.
+    #[serde(rename = "L")]
     InternLongInt(LongIntId),
     /// A builtin function or exception type
+    #[serde(rename = "A")]
     Builtin(Builtins),
     /// A function from a module (not a global builtin).
     /// Module functions require importing a module to access (e.g., `asyncio.gather`).
+    #[serde(rename = "M")]
     ModuleFunction(ModuleFunctions),
     /// A function defined in the module (not a closure, doesn't capture any variables)
+    #[serde(rename = "D")]
     DefFunction(FunctionId),
     /// A marker value representing special objects like sys.stdout/stderr.
     /// These exist but have minimal functionality in the sandboxed environment.
+    #[serde(rename = "K")]
     Marker(Marker),
     /// A property descriptor that computes its value when accessed.
     /// When retrieved via `py_getattr`, the property's getter is invoked.
+    #[serde(rename = "P")]
     Property(Property),
 
     // Heap-allocated values (stored in arena)
+    #[serde(rename = "C")]
     Ref(HeapId),
 
     /// Sentinel value indicating this Value was properly cleaned up via `drop_with`.
@@ -97,6 +113,7 @@ pub(crate) enum Value {
     /// correctness - if a `Ref` variant is dropped without calling `drop_with`, the
     /// Drop impl will panic.
     #[cfg(feature = "memory-model-checks")]
+    #[serde(rename = "G")]
     Dereferenced,
 }
 
@@ -823,12 +840,12 @@ impl<'h> PyTrait<'h> for Value {
                 if *b == 0.0 {
                     Err(ExcType::zero_division().into())
                 } else {
-                    Ok(Some(Self::Float((f64::from(*a) / b).floor())))
+                    Ok(Some(Self::Float(py_float_divmod(f64::from(*a), *b).0)))
                 }
             }
             (Self::Float(a), Self::Bool(b)) => {
                 if *b {
-                    Ok(Some(Self::Float(a.floor()))) // a // 1.0 = floor(a)
+                    Ok(Some(Self::Float(py_float_divmod(*a, 1.0).0)))
                 } else {
                     Err(ExcType::zero_division().into())
                 }
@@ -856,40 +873,25 @@ impl<'h> PyTrait<'h> for Value {
 
     /// One-sided implementation of Python `%`.
     fn py_mod_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            if b == 0 {
+                return Err(ExcType::zero_division().into());
+            }
+            let result = match a.checked_rem(b) {
+                Some(r) if r != 0 && (a < 0) != (b < 0) => r + b,
+                Some(r) => r,
+                // i64::MIN % -1 overflows, but its remainder is zero.
+                None => 0,
+            };
+            return Ok(Some(Self::Int(result)));
+        }
+        if let (Some(a), Some(b)) = (immediate_float(self), immediate_float(other)) {
+            if b == 0.0 {
+                return Err(ExcType::zero_division().into());
+            }
+            return Ok(Some(Self::Float(py_float_mod(a, b))));
+        }
         match (self, other) {
-            (Self::Int(a), Self::Int(b)) => {
-                if *b == 0 {
-                    Err(ExcType::zero_division().into())
-                } else if let Some(r) = a.checked_rem(*b) {
-                    // Python modulo: result has the same sign as divisor (b)
-                    let result = if r != 0 && (*a < 0) != (*b < 0) { r + *b } else { r };
-                    Ok(Some(Self::Int(result)))
-                } else {
-                    // Overflow - i64::MIN % -1 is 0
-                    Ok(Some(Self::Int(0)))
-                }
-            }
-            (Self::Float(v1), Self::Float(v2)) => {
-                if *v2 == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(py_float_mod(*v1, *v2))))
-                }
-            }
-            (Self::Float(v1), Self::Int(v2)) => {
-                if *v2 == 0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(py_float_mod(*v1, *v2 as f64))))
-                }
-            }
-            (Self::Int(v1), Self::Float(v2)) => {
-                if *v2 == 0.0 {
-                    Err(ExcType::zero_division().into())
-                } else {
-                    Ok(Some(Self::Float(py_float_mod(*v1 as f64, *v2))))
-                }
-            }
             // `str % args` and `bytes % args` are printf-style formatting; heap values reach it via `HeapRead`.
             (Self::InternString(id), _) => {
                 let template = copy_format_template(vm.interns.get_str(*id), &vm.heap.tracker)?;
@@ -971,28 +973,20 @@ impl<'h> PyTrait<'h> for Value {
                         }
                     } else {
                         // Negative exponent: CPython hands off to `float_pow`
-                        Ok(Some(Self::Float(float_pow(*base as f64, *exp as f64)?)))
+                        Ok(Some(float_pow_value(*base as f64, *exp as f64, vm.heap)?))
                     }
                 }
-                (Self::Float(base), Self::Float(exp)) => Ok(Some(Self::Float(float_pow(*base, *exp)?))),
-                (Self::Int(base), Self::Float(exp)) => Ok(Some(Self::Float(float_pow(*base as f64, *exp)?))),
-                (Self::Float(base), Self::Int(exp)) => Ok(Some(Self::Float(float_pow(*base, *exp as f64)?))),
+                (Self::Float(base), Self::Float(exp)) => Ok(Some(float_pow_value(*base, *exp, vm.heap)?)),
+                (Self::Int(base), Self::Float(exp)) => Ok(Some(float_pow_value(*base as f64, *exp, vm.heap)?)),
+                (Self::Float(base), Self::Int(exp)) => Ok(Some(float_pow_value(*base, *exp as f64, vm.heap)?)),
                 // Bool power operations (True=1, False=0)
                 (Self::Bool(base), Self::Int(exp)) => {
                     let base_int = i64::from(*base);
                     if *exp >= 0 {
-                        // Positive exponent: 1**n=1, 0**n=0 (for n>0), 0**0=1
-                        if let Ok(exp_u32) = u32::try_from(*exp) {
-                            match base_int.checked_pow(exp_u32) {
-                                Some(result) => Ok(Some(Self::Int(result))),
-                                None => Ok(Some(Self::Float((base_int as f64).powf(*exp as f64)))),
-                            }
-                        } else {
-                            Ok(Some(Self::Float((base_int as f64).powf(*exp as f64))))
-                        }
+                        Ok(Some(Self::Int(i64::from(*base || *exp == 0))))
                     } else {
                         // Negative exponent: CPython hands off to `float_pow`
-                        Ok(Some(Self::Float(float_pow(base_int as f64, *exp as f64)?)))
+                        Ok(Some(float_pow_value(base_int as f64, *exp as f64, vm.heap)?))
                     }
                 }
                 (Self::Int(base), Self::Bool(exp)) => {
@@ -1003,7 +997,7 @@ impl<'h> PyTrait<'h> for Value {
                         Ok(Some(Self::Int(1)))
                     }
                 }
-                (Self::Bool(base), Self::Float(exp)) => Ok(Some(Self::Float(float_pow(f64::from(*base), *exp)?))),
+                (Self::Bool(base), Self::Float(exp)) => Ok(Some(float_pow_value(f64::from(*base), *exp, vm.heap)?)),
                 (Self::Float(base), Self::Bool(exp)) => {
                     // base ** True = base, base ** False = 1.0
                     if *exp {
@@ -1205,20 +1199,18 @@ impl<'h> PyTrait<'h> for Value {
 impl Value {
     /// One-sided implementation of Python `+`.
     pub(crate) fn py_add_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            let result = match a.checked_add(b) {
+                Some(result) => Self::Int(result),
+                None => wide_i128_into_value(i128::from(a) + i128::from(b), vm.heap),
+            };
+            return Ok(Some(result));
+        }
+        if let (Some(a), Some(b)) = (immediate_float(self), immediate_float(other)) {
+            return Ok(Some(Self::Float(a + b)));
+        }
         let interns = vm.interns;
         match (self, other) {
-            // Int + Int with overflow detection
-            (Self::Int(a), Self::Int(b)) => {
-                if let Some(result) = a.checked_add(*b) {
-                    Ok(Some(Self::Int(result)))
-                } else {
-                    Ok(Some(wide_i128_into_value(i128::from(*a) + i128::from(*b), vm.heap)))
-                }
-            }
-            (Self::Float(v1), Self::Float(v2)) => Ok(Some(Self::Float(v1 + v2))),
-            // Int + Float and Float + Int
-            (Self::Int(a), Self::Float(b)) => Ok(Some(Self::Float(*a as f64 + b))),
-            (Self::Float(a), Self::Int(b)) => Ok(Some(Self::Float(a + *b as f64))),
             (Self::InternString(s1), Self::InternString(s2)) => Ok(Some(concat_allocate_str(
                 interns.get_str(*s1),
                 interns.get_str(*s2),
@@ -1303,20 +1295,17 @@ impl Value {
 
     /// One-sided implementation of Python `-`.
     pub(crate) fn py_sub_impl(&self, other: &Self, vm: &mut VM<'_>) -> RunResult<Option<Self>> {
+        if let (Some(a), Some(b)) = (immediate_int(self), immediate_int(other)) {
+            let result = match a.checked_sub(b) {
+                Some(result) => Self::Int(result),
+                None => wide_i128_into_value(i128::from(a) - i128::from(b), vm.heap),
+            };
+            return Ok(Some(result));
+        }
+        if let (Some(a), Some(b)) = (immediate_float(self), immediate_float(other)) {
+            return Ok(Some(Self::Float(a - b)));
+        }
         match (self, other) {
-            // Int - Int with overflow detection
-            (Self::Int(a), Self::Int(b)) => {
-                if let Some(result) = a.checked_sub(*b) {
-                    Ok(Some(Self::Int(result)))
-                } else {
-                    Ok(Some(wide_i128_into_value(i128::from(*a) - i128::from(*b), vm.heap)))
-                }
-            }
-            // Float - Float
-            (Self::Float(a), Self::Float(b)) => Ok(Some(Self::Float(a - b))),
-            // Int - Float and Float - Int
-            (Self::Int(a), Self::Float(b)) => Ok(Some(Self::Float(*a as f64 - b))),
-            (Self::Float(a), Self::Int(b)) => Ok(Some(Self::Float(a - *b as f64))),
             (Self::Ref(id), _) => vm.heap.read(*id).py_sub_impl(other, vm),
             _ => Ok(None),
         }
@@ -1710,26 +1699,7 @@ impl Value {
             // Bool and int hash directly as their value, and are equivalent
             Self::Bool(b) => Ok(Some(HashValue::new((*b).into()))),
             Self::Int(i) => Ok(Some(HashValue::new(i.cast_unsigned()))),
-            Self::Float(f) => {
-                // 2^63, the first power of two past i64::MAX (exactly representable).
-                const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
-                if f.fract() != 0.0 || !f.is_finite() {
-                    // Non-integral or non-finite: hash the bit representation.
-                    Ok(Some(HashValue::new(f.to_bits())))
-                } else if *f >= -TWO_POW_63 && *f < TWO_POW_63 {
-                    // Integral float in i64 range hashes as the equivalent int
-                    // (e.g. `1.0` hashes the same as `1`).
-                    #[expect(clippy::cast_possible_truncation)]
-                    Ok(Some(HashValue::new((*f as i64).cast_unsigned())))
-                } else {
-                    // Integral float outside i64 range hashes as the equivalent
-                    // big int, so an exactly-equal `float`/`int` pair (e.g.
-                    // `2.0**100 == 2**100`) preserves `hash(a) == hash(b)`.
-                    Ok(Some(hash_python_long_int(
-                        &BigInt::from_f64(*f).expect("finite f64 converts to BigInt"),
-                    )))
-                }
-            }
+            Self::Float(f) => Ok(Some(hash_f64(*f))),
             // For heap-allocated values, dispatch to the per-type `py_hash`
             // impl. Types that benefit from caching (Str/Bytes/Tuple/
             // NamedTuple/FrozenSet/Path) carry an inline `cached_hash`;
@@ -1823,44 +1793,14 @@ impl Value {
                     return Ok(call_result);
                 }
             }
+            // Type objects (`list`, `date`, `chain`) answer for themselves:
+            // `__name__`, class constants and the members handed out as values
+            // all live with the type, including the `AttributeError`.
             Self::Builtin(Builtins::Type(t)) => {
-                // Handle type object attributes like __name__
-                let is_dunder_name = attr.static_string(vm.interns).map_or_else(
-                    || attr.as_str(vm.interns) == "__name__",
-                    |ss| ss == StaticStrings::DunderName,
-                );
-                if is_dunder_name {
-                    return Ok(CallResult::Value(allocate_string(
-                        t.dunder_name(vm.heap, vm.interns),
-                        vm.heap,
-                    )));
-                }
-                let t = *t;
-                if let Some(constant) = t.class_constant(attr, vm) {
-                    return Ok(CallResult::Value(constant));
-                }
-                // `chain.from_iterable`, the one attribute an `itertools`
-                // type carries. Handed out as a value so it can be bound and
-                // called later, not only called in place.
-                if t == Type::ItertoolsChain && attr.static_string(vm.interns) == Some(StaticStrings::FromIterable) {
-                    return Ok(CallResult::Value(Self::ModuleFunction(ModuleFunctions::Itertools(
-                        ItertoolsFunctions::ChainFromIterable,
-                    ))));
-                }
-                // `object.__setattr__` is the only member `object` carries: it
-                // exists so a class that hooks attribute writes has a way to
-                // perform one (see `limitations/classes.md`).
-                if t == Type::Object && attr.as_str(vm.interns) == "__setattr__" {
-                    return Ok(CallResult::Value(Self::Builtin(Builtins::Function(
-                        BuiltinsFunctions::ObjectSetattr,
-                    ))));
-                }
-                // CPython names the class rather than the metaclass here:
-                // `type object 'list' has no attribute 'nonexistent'`.
-                return Err(ExcType::attribute_error_type(
-                    &t.name(vm.heap, vm.interns),
-                    attr.as_str(vm.interns),
-                ));
+                return match t.class_getattr(attr, vm) {
+                    Some(value) => Ok(CallResult::Value(value)),
+                    None => Err(t.attribute_error(attr, vm)),
+                };
             }
             _ => {}
         }
@@ -2736,7 +2676,19 @@ pub(crate) fn py_float_divmod(a: f64, b: f64) -> (f64, f64) {
     (floordiv, modulus)
 }
 
-/// Raises `base` to `exp` with CPython's `float_pow` error rules.
+/// Python `base ** exp` for real operands: [`float_pow`], except that a negative
+/// base with a fractional exponent yields a `complex` as CPython's `float_pow` does
+/// (`(-8.0) ** (1/3)`), which is why the result is a `Value` rather than an `f64`.
+pub(crate) fn float_pow_value(base: f64, exp: f64, heap: &Heap) -> RunResult<Value> {
+    if base < 0.0 && base.is_finite() && exp.is_finite() && exp.fract() != 0.0 {
+        Ok(Complex::new(base, 0.0).pow(Complex::new(exp, 0.0))?.into_value(heap))
+    } else {
+        float_pow(base, exp).map(Value::Float)
+    }
+}
+
+/// Raises `base` to `exp` with CPython's `float_pow` error rules, for callers that
+/// know the result is real; Python-level `**` goes through [`float_pow_value`].
 ///
 /// Zero to a finite negative power is `ZeroDivisionError`, and finite operands whose
 /// result overflows raise `OverflowError` where C's `pow` would set `ERANGE`. Infinite or

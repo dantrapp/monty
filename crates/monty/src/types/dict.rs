@@ -152,7 +152,9 @@ impl DictKind {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DictEntry {
+    #[serde(rename = "K")]
     key: Value,
+    #[serde(rename = "V")]
     value: Value,
     /// The key's hash, kept for `insert_unique`. Never serialized: hashes are
     /// recomputed on the first keyed operation after a dump is loaded, so the
@@ -2225,9 +2227,9 @@ fn dict_popitem<'h>(dict: &mut HeapRead<'h, Dict>, vm: &mut VM<'h>) -> RunResult
 impl serde::Serialize for Dict {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut state = serializer.serialize_struct("Dict", 3)?;
-        state.serialize_field("entries", &self.entries)?;
-        state.serialize_field("contains_refs", &self.contains_refs)?;
-        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("E", &self.entries)?;
+        state.serialize_field("C", &self.contains_refs)?;
+        state.serialize_field("K", &self.kind)?;
         state.end()
     }
 }
@@ -2236,8 +2238,11 @@ impl<'de> serde::Deserialize<'de> for Dict {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(serde::Deserialize)]
         struct DictFields {
+            #[serde(rename = "E")]
             entries: Vec<DictEntry>,
+            #[serde(rename = "C")]
             contains_refs: bool,
+            #[serde(rename = "K")]
             kind: DictKind,
         }
         let fields = DictFields::deserialize(deserializer)?;
